@@ -2,6 +2,25 @@ provider "aws" {
   region = "ap-south-1"  # Change this to your desired region
 }
 
+################# Defining Variable
+variable "db_name" {
+  description = "The name of the database"
+  type        = string
+  default     = "wp"  # Specify the desired database name here
+}
+variable "db_username" {
+  description = "The username for the database"
+  type        = string
+  default     = "thiru"  # Specify the desired username here
+}
+
+variable "db_password" {
+  description = "The password for the database"
+  type        = string
+  default     = "thiru1234"  # Specify the desired password here
+}
+
+
 ######################## Create VPC
 resource "aws_vpc" "main" {
   cidr_block = "10.0.0.0/16"
@@ -130,7 +149,7 @@ resource "aws_route_table" "private_2" {
 }
 
 
-######################## Privat Subnet Association to Route Table
+######################## Private Subnet Association to Route Table
 resource "aws_route_table_association" "private_subnet_association_1" {
   subnet_id      = aws_subnet.private_subnet_1.id
   route_table_id = aws_route_table.private_1.id
@@ -256,25 +275,24 @@ output "private_security_group_id" {
 }
 
 resource "aws_security_group" "db_security_group" {
-  name = "db"  # Set the name to "bastion_host"
+  name = "db"
 
-  vpc_id = aws_vpc.main.id  # Replace with your VPC ID
+  vpc_id = aws_vpc.main.id
 
-  // Inbound rule allowing traffic on port 3306 (MySQL) from any source
   ingress {
     from_port   = 3306
     to_port     = 3306
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    security_groups = [aws_security_group.private_security_group.id]  // Allow only private instances to access DB
   }
 
-  // Outbound rule allowing all traffic to any destination on any port
   egress {
     from_port   = 0
     to_port     = 65535
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+
   tags = {
     Name = "DB_SG"
   }
@@ -300,12 +318,48 @@ resource "aws_instance" "public_instance" {
 resource "aws_instance" "private_instances" {
   ami           = "ami-0b41f7055516b991a"  # Replace with your desired AMI ID
   instance_type = "t2.micro"
-  count         = 4  # Changed to 4 private instances
+  count         = 2  # Changed to 4 private instances
   subnet_id     = count.index % 2 == 0 ? aws_subnet.private_subnet_1.id : aws_subnet.private_subnet_2.id
   vpc_security_group_ids = [aws_security_group.private_security_group.id]
   key_name      = "webserver"  # Replace with your key pair name
+  
+  user_data = <<-EOF
+    #!/bin/bash
+    sudo yum update -y
+
+    # Enable and install PHP 7.4 from Amazon Linux Extras
+    sudo amazon-linux-extras install php7.4 -y
+    sudo yum install php php-mysqlnd -y  # Ensure php-mysqlnd is installed
+
+    # Install Apache
+    sudo yum install httpd -y
+
+    # Install wget
+    sudo yum install wget -y
+
+    # Download and install WordPress
+    wget https://wordpress.org/latest.tar.gz
+    tar -xzf latest.tar.gz
+    sudo mkdir -p /var/www/html/
+    sudo mv wordpress/* /var/www/html/
+
+    # Set permissions
+    sudo chown -R apache:apache /var/www/html/
+    sudo chmod -R 755 /var/www/html/
+
+    # Configure WordPress
+    cp /var/www/html/wp-config-sample.php /var/www/html/wp-config.php
+    sed -i "s/database_name_here/${var.db_name}/" /var/www/html/wp-config.php
+    sed -i "s/username_here/${var.db_username}/" /var/www/html/wp-config.php
+    sed -i "s/password_here/${var.db_password}/" /var/www/html/wp-config.php
+    sed -i "s/localhost/${aws_db_instance.db_instance.address}/" /var/www/html/wp-config.php
+
+    # Restart Apache
+    sudo systemctl restart httpd
+    sudo systemctl enable httpd
+  EOF
   tags = {
-    Name = "Werserver-${count.index + 1}"
+    Name = "Webserver-${count.index + 1}"
   }
 }
 
@@ -360,11 +414,12 @@ resource "aws_lb_listener" "web" {
 
 ###################### Instances Attachement
 resource "aws_lb_target_group_attachment" "private_to_target_group" {
-  count           = 4
+  count           = 2
   target_group_arn = aws_lb_target_group.web_target_group.arn
   target_id       = aws_instance.private_instances[count.index].id
   port            = 80
 }
+
 
 ######################### Create DB Subnet Group
 resource "aws_db_subnet_group" "db_subnet_group" {
@@ -374,13 +429,15 @@ resource "aws_db_subnet_group" "db_subnet_group" {
     aws_subnet.private_subnet_2.id
   ]
 }
+######################### Create RDS Instance
 resource "aws_db_instance" "db_instance" {
   identifier           = "db-instance"
   allocated_storage    = 20
   storage_type         = "gp2"
   engine               = "mysql"
   engine_version       = "5.7"
-  instance_class       = "db.t3.micro"  # Adjusted instance class
+  instance_class       = "db.t3.micro"
+  db_name		       = "wp"
   username             = "thiru"
   password             = "thiru1234"
   parameter_group_name = "default.mysql5.7"
@@ -391,23 +448,8 @@ resource "aws_db_instance" "db_instance" {
 
   db_subnet_group_name = aws_db_subnet_group.db_subnet_group.name
 
+
   tags = {
     Name = "MyRDSInstance"
-  }
-}
-
-resource "aws_route53_zone" "thirumaalt" {
-  name    = "thirumaalt.com"
-  comment = "Webserver"
-}
-
-resource "aws_route53_record" "alb_record" {
-  zone_id = aws_route53_zone.thirumaalt.zone_id
-  name    = "www.thirumaalt.com"
-  type    = "A"
-  alias {
-    name                   = aws_lb.my_load_balancer.dns_name
-    zone_id                = aws_lb.my_load_balancer.zone_id
-    evaluate_target_health = true
   }
 }
